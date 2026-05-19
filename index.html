@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>Toilettenpausen Tracker</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#0d9488">
+  <style>
+    :root{--bg:#0b1324;--card:#111a2b;--muted:#6b7280;--ok:#16a34a;--away:#dc2626;--back:#6b7280;--text:#f8fafc;--accent:#0ea5e9}
+    html,body{height:100%}
+    body{margin:0;background:linear-gradient(180deg,#0b1324,#0d0f1a);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+    header{position:sticky;top:0;background:rgba(11,19,36,.85);backdrop-filter:blur(6px);z-index:10;border-bottom:1px solid #1f2937}
+    .wrap{max-width:1100px;margin:0 auto;padding:10px 14px}
+    h1{font-size:1.25rem;margin:6px 0}
+    .controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}
+    button, .file-btn{background:#0f172a;border:1px solid #1f2937;color:var(--text);padding:10px 14px;border-radius:12px;cursor:pointer;font-size:16px}
+    button.primary{background:var(--accent);border-color:#0284c7}
+    button:active{transform:scale(.98)}
+    input[type=file]{display:none}
+    .chips{display:flex;gap:6px;flex-wrap:wrap}
+    .chip{background:#0f172a;border:1px dashed #334155;padding:6px 10px;border-radius:999px;font-size:14px}
+
+    .grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));}
+    .student{border-radius:18px;padding:16px 12px;text-align:center;background:var(--card);border:1px solid #1f2937;user-select:none}
+    .student button{width:100%;height:82px;border-radius:14px;border:none;color:white;font-size:18px;font-weight:700}
+    .state-0 button{background:var(--ok)}
+    .state-1 button{background:var(--away)}
+    .state-2 button{background:var(--back);color:#e5e7eb}
+    .meta{margin-top:8px;color:#cbd5e1;font-size:12px}
+
+    .table-wrap{margin:14px 0;background:var(--card);border:1px solid #1f2937;border-radius:14px;overflow:auto}
+    table{width:100%;border-collapse:collapse;min-width:640px}
+    th,td{padding:10px 12px;border-bottom:1px solid #1f2937;font-size:14px}
+    th{text-align:left;color:#cbd5e1;background:#0f172a;position:sticky;top:0}
+    tr:hover td{background:#0f172a}
+
+    .footer{color:#94a3b8;font-size:12px;margin-top:8px}
+
+    @media (hover:none){
+      button, .file-btn{padding:14px 16px;font-size:18px}
+      .student button{height:96px;font-size:20px}
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <h1>Toilettenpausen Tracker</h1>
+      <div class="controls">
+        <label class="file-btn" for="fileInput">Excel/CSV importieren</label>
+        <input id="fileInput" type="file" accept=".xlsx,.xls,.csv" />
+        <button id="exportCsv">CSV exportieren</button>
+        <button id="exportXlsx">Excel exportieren</button>
+        <button id="reset" title="Nur Status & laufende Zeiten zurücksetzen, Daten bleiben gespeichert">Status zurücksetzen</button>
+        <span class="chip" id="today"></span>
+      </div>
+      <div class="chips" id="classInfo"></div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section>
+      <div id="students" class="grid" aria-live="polite"></div>
+    </section>
+
+    <section class="table-wrap">
+      <table id="logTable">
+        <thead>
+          <tr>
+            <th>Datum</th>
+            <th>Schüler</th>
+            <th>Start</th>
+            <th>Ende</th>
+            <th>Dauer</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+    <div class="footer">Offline nutzbar – PWA installierbar. Daten werden lokal im Browser gespeichert.</div>
+  </main>
+
+  <script>
+    // ---- State ----
+    const LS_KEY = 'wc-tracker-v1';
+    const state = {
+      students: [], // [{id,name,state:0|1|2,lastStart:iso}]
+      logs: []      // [{date,name,start,end,durationSec}]
+    };
+
+    function load(){
+      try{const s = JSON.parse(localStorage.getItem(LS_KEY)); if(s){state.students=s.students||[]; state.logs=s.logs||[]}}
+      catch(e){}
+    }
+    function save(){
+      localStorage.setItem(LS_KEY, JSON.stringify(state));
+    }
+
+    function fmtTime(d){return new Date(d).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}
+    function fmtDate(d){return new Date(d).toLocaleDateString()}
+    function pad(n){return n.toString().padStart(2,'0')}
+    function durFmt(sec){const m=Math.floor(sec/60), s=sec%60; return `${m}:${pad(s)}`}
+
+    function renderStudents(){
+      const wrap = document.getElementById('students');
+      wrap.innerHTML = '';
+      state.students.forEach(st =>{
+        const card = document.createElement('div');
+        card.className = `student state-${st.state||0}`;
+
+        const btn = document.createElement('button');
+        btn.textContent = st.name;
+        btn.setAttribute('aria-label', `Status wechseln für ${st.name}`);
+        btn.addEventListener('click', ()=>toggleStudent(st.id));
+
+        const meta = document.createElement('div');
+        meta.className='meta';
+        meta.textContent = st.state===1 && st.lastStart ? `seit ${fmtTime(st.lastStart)}` : (st.state===2 && st.lastStart ? `zurück um ${fmtTime(st.lastStart)}` : 'anwesend');
+
+        card.appendChild(btn); card.appendChild(meta);
+        wrap.appendChild(card);
+      })
+    }
+
+    function renderLogs(){
+      const tbody = document.querySelector('#logTable tbody');
+      tbody.innerHTML='';
+      state.logs.forEach(row=>{
+        const tr=document.createElement('tr');
+        tr.innerHTML = `<td>${fmtDate(row.date)}</td><td>${row.name}</td><td>${fmtTime(row.start)}</td><td>${row.end?fmtTime(row.end):''}</td><td>${row.durationSec!=null?durFmt(row.durationSec):''}</td>`;
+        tbody.appendChild(tr);
+      })
+    }
+
+    function toggleStudent(id){
+      const st = state.students.find(s=>s.id===id);
+      if(!st) return;
+      const now = new Date().toISOString();
+      if(st.state===0||st.state==null){
+        // to away
+        st.state=1; st.lastStart=now;
+      } else if(st.state===1){
+        // back, close log
+        const start = st.lastStart || now;
+        const end = now;
+        const dur = Math.max(0, Math.round((new Date(end)-new Date(start))/1000));
+        state.logs.push({date:new Date().toISOString(), name: st.name, start, end, durationSec:dur});
+        st.state=2; st.lastStart=end;
+      } else {
+        // back to present
+        st.state=0; st.lastStart=null;
+      }
+      save();
+      renderStudents();
+      renderLogs();
+    }
+
+    // ---- Import ----
+    async function parseCSV(text){
+      // very small CSV parser (name in first column)
+      const lines = text.split(/\r?\n/).filter(l=>l.trim().length);
+      const names = [];
+      for(const line of lines){
+        const first = line.split(';').length>1? line.split(';')[0] : line.split(',')[0];
+        const name = first.replace(/^\ufeff/, '').trim();
+        if(name && name.toLowerCase()!=='name') names.push(name);
+      }
+      return names;
+    }
+
+    async function readXlsx(file){
+      return new Promise((resolve,reject)=>{
+        const fr = new FileReader();
+        fr.onload = ()=>{
+          try{
+            const data = new Uint8Array(fr.result);
+            // Lazy-load XLSX from CDN for offline later cached by SW
+            const ensure = async ()=>{
+              if(!window.XLSX){
+                const s=document.createElement('script');
+                s.src='https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+                document.head.appendChild(s);
+                await new Promise(r=>{s.onload=r; s.onerror=()=>r()});
+              }
+            };
+            (async()=>{
+              await ensure();
+              if(!window.XLSX){reject(new Error('XLSX nicht verfügbar'));return;}
+              const wb = XLSX.read(data, {type:'array'});
+              const sh = wb.Sheets[wb.SheetNames[0]];
+              const rows = XLSX.utils.sheet_to_json(sh, {header:1});
+              const names = rows.map(r=> (r&&r[0]? String(r[0]).trim(): '')).filter(n=>n && n.toLowerCase()!=='name');
+              resolve(names);
+            })();
+          }catch(e){reject(e)}
+        };
+        fr.onerror = ()=>reject(fr.error);
+        fr.readAsArrayBuffer(file);
+      });
+    }
+
+    document.getElementById('fileInput').addEventListener('change', async (e)=>{
+      const f = e.target.files[0]; if(!f) return;
+      let names=[];
+      try{
+        if(/\.csv$/i.test(f.name)){
+          const txt = await f.text();
+          names = await parseCSV(txt);
+        } else {
+          names = await readXlsx(f);
+        }
+      }catch(err){
+        alert('Import fehlgeschlagen: '+ err.message);
+        return;
+      }
+      if(!names.length){alert('Keine Namen gefunden. Erste Spalte sollte die Namen enthalten.'); return;}
+      // build students list
+      state.students = names.map((n,i)=>({id:i+1,name:n,state:0,lastStart:null}));
+      save();
+      renderStudents();
+      document.getElementById('classInfo').innerHTML = `<span class="chip">${names.length} Schüler</span>`;
+    });
+
+    // ---- Export ----
+    function toCsv(){
+      const header=['Datum','Schüler','Start','Ende','Dauer (Sek)'];
+      const rows = state.logs.map(r=>[fmtDate(r.date), r.name, fmtTime(r.start), r.end?fmtTime(r.end):'', r.durationSec??'']);
+      const csv = [header].concat(rows).map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(';')).join('\n');
+      return new Blob([csv], {type:'text/csv;charset=utf-8;'});
+    }
+
+    function downloadBlob(blob, filename){
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href=url; a.download=filename; document.body.appendChild(a); a.click();
+      setTimeout(()=>{URL.revokeObjectURL(url); a.remove();}, 0);
+    }
+
+    document.getElementById('exportCsv').addEventListener('click', ()=>{
+      downloadBlob(toCsv(), `toilettenpausen_${new Date().toISOString().slice(0,10)}.csv`);
+    });
+
+    document.getElementById('exportXlsx').addEventListener('click', async ()=>{
+      // On-demand XLSX build
+      const s=document.createElement('script');
+      s.src='https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+      document.head.appendChild(s);
+      await new Promise(r=>{s.onload=r; s.onerror=r});
+      if(!window.XLSX){alert('XLSX Bibliothek nicht geladen.'); return;}
+      const header=['Datum','Schüler','Start','Ende','Dauer (Sek)'];
+      const rows = state.logs.map(r=>[fmtDate(r.date), r.name, fmtTime(r.start), r.end?fmtTime(r.end):'', r.durationSec??'']);
+      const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Abwesenheiten');
+      const out = XLSX.write(wb, {bookType:'xlsx', type:'array'});
+      downloadBlob(new Blob([out],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}), `toilettenpausen_${new Date().toISOString().slice(0,10)}.xlsx`);
+    });
+
+    document.getElementById('reset').addEventListener('click', ()=>{
+      state.students.forEach(s=>{s.state=0; s.lastStart=null});
+      save(); renderStudents();
+    });
+
+    // ---- Init ----
+    function init(){
+      load();
+      renderStudents();
+      renderLogs();
+      document.getElementById('today').textContent = new Date().toLocaleDateString(undefined,{weekday:'long', year:'numeric', month:'2-digit', day:'2-digit'});
+
+      // register service worker
+      if('serviceWorker' in navigator){
+        navigator.serviceWorker.register('sw.js');
+      }
+    }
+    init();
+  </script>
+</body>
+</html>
